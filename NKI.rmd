@@ -1,0 +1,281 @@
+---
+title: "CISC351_NKI_cleanup"
+author: "Ferris"
+date: "06/03/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(dplyr)
+library(Hmisc)
+library(GGally)
+library(e1071)
+library(stringr)
+library(tidyverse)
+library(psych)
+library(caret)
+library(regclass)
+```
+
+## Explore dataset, add features, and visualize
+
+```{r cars}
+NKI <- read.csv("~/Desktop/NKI_cleaned.csv")
+
+#make NKI df numeric
+NKI_num<-NKI[,sapply(NKI,is.numeric)]
+
+#remove timerecurrence and eventdeath as options for correlation, as they will be highly correlated but we are not interested in them (we only want microarray data)
+NKI_num <- NKI_num %>% 
+  select(-c(timerecurrence, eventdeath))
+
+## Get rid of correlational variables
+NKI$survival_binary <- cut(NKI$survival, breaks=c(0, 8.0806, 20), labels=c("0","1"))
+NKI_bin <- subset(NKI, select=c(Patient:survival, survival_binary, timerecurrence:AF067420))
+NKI_bin_nocor <- NKI_bin %>% 
+  select(-c(timerecurrence, eventdeath, survival))
+write.csv(NKI_bin_nocor, "~/Desktop/NKI_with_bins_nocor.csv")
+
+#make correlation dataframe
+try <- data.frame(cor(NKI_num, use = "complete.obs", method = "pearson"))
+
+#take only the survival correlations
+surv_cor <- try %>% 
+  select(c(survival))
+
+#find the variables best correlated to survival (using absolute value)
+best_surv_cor <- surv_cor[order(-abs(surv_cor$survival)), , drop = FALSE]
+
+#take the top 100
+best_surv_cor[1:100,1]
+#UMMMM, ID made it into the top 100??? As #96?? Yikes.
+
+#take top 50 instead
+best_surv_cor[1:50,1]
+rownames(best_surv_cor)[1:50]
+
+#slim down the NKI_num dataset into the variables most correlated to survival
+NKI_trim <- NKI_num %>% 
+  select(c(rownames(best_surv_cor)[1:25]))
+
+#make new correlation martix
+NKI_trim <- data.frame(cor(NKI_trim, use = "complete.obs", method = "pearson"))
+
+#make heatmap
+#data1<-as.matrix(NKI_trim)
+#heatmap(data1,scale = "column")
+#its too ugly
+
+#try ggplot heatmap instead
+library(reshape2)
+melted_NKI <- melt(as.matrix(NKI_trim))
+head(melted_NKI)
+
+library(ggplot2)
+ggplot(data = melted_NKI, aes(x=Var1, y=Var2, fill=value)) + 
+  geom_tile()
+#that's a bit better
+
+#make a nice heatmap
+ggplot(data = melted_NKI, aes(Var2, Var1, fill = value))+
+ geom_tile(color = "white" )+
+ scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
+   midpoint = 0, limit = c(-1, 1), space = "Lab", 
+   name="Pearson\nCorrelation") +
+  theme_minimal()+ 
+ theme(axis.text.x = element_text(angle = 45, vjust = 1, 
+    size = 12, hjust = 1))+
+  theme(
+  axis.text.y = element_text(size = 6),
+  axis.text.x = element_text(size = 6),
+  axis.title.x = element_blank(),
+  axis.title.y = element_blank(),
+  panel.grid.major = element_blank(),
+  panel.border = element_blank(),
+  panel.background = element_blank(),
+  axis.ticks = element_blank()) +
+ coord_fixed()
+
+
+#take all the rows of one gene (so all 272 patients)
+#OR take all the genes of a random patient and make a matrix from it
+patient <- NKI[2, ]
+patient <- patient %>% 
+  select(-c(Patient:esr1))
+
+#patient needs to lose 32 rows of data to make this work
+patient <- patient %>% 
+  select(-c(G3PDH_570:AB033083))
+
+patient <- as.data.frame(patient, 39, 39)
+patm <- data.matrix(patient)
+
+library(RColorBrewer)
+coul <- colorRampPalette(brewer.pal(8, "RdYlGn"))(100)
+heatmap(patm, Colv = NA, Rowv = NA, col = coul)
+
+heatmap(patm, Colv = NA, Rowv = NA, col = heat.colors(256)) #okay, not too bad
+
+ggplot(data = patient, aes(x=Var1, y=Var2, fill=value)) + 
+  geom_tile()
+```
+
+## Check normality and distribution of data
+
+```{r pressure, echo=FALSE}
+
+##count number of NAs in each variable
+missing.data <- summary(is.na(NKI))
+missing.data <- as.data.frame(missing.data)
+missing.data <- as.data.frame(summary(is.na(data)))
+
+#no missing values
+ missing.data <- missing.data %>%
+  filter_all(any_vars(str_detect(Freq, pattern ="TRUE")))
+
+ ## check skewness
+ skewness(NKI$survival) #0.474214, so its fine
+ skewness((NKI$surv_quartile_event)^3)
+ 
+ ## add features
+ 
+ ##survival binned
+ #worst to best
+ #short_die, short_alive, long_die, long_alive
+
+NKI$survival_binary <- cut(NKI$survival, breaks=c(0, 8.0806, 20), labels=c("0","1"))
+
+NKI$surv_binary_event <- NA
+ for(i in 1:length(NKI$survival_binary)){
+if(NKI$survival_binary[i] == 0 && NKI$eventdeath[i] == 1){NKI$surv_binary_event[i] <- 0} 
+#short time, they died
+if(NKI$survival_binary[i] == 1 && NKI$eventdeath[i] == 1){NKI$surv_binary_event[i] <- 1}
+#long time, they died
+if(NKI$survival_binary[i] == 0 && NKI$eventdeath[i] == 0){NKI$surv_binary_event[i] <- 2} #short time, they #short time, didn't die
+if(NKI$survival_binary[i] == 1 && NKI$eventdeath[i] == 0){NKI$surv_binary_event[i] <- 3}
+#long time, they didn't die
+ }
+
+ s <- NKI %>% 
+   filter(eventdeath == 1) %>% 
+   select(c("survival"))
+ #skewness 1.178118
+   
+ s <- NKI %>% 
+   filter(eventdeath == 0) %>% 
+   select(c("survival"))
+ #skewness 0.7816949
+ 
+skewness(s$survival)
+ 
+filter_all(any_vars(str_detect(Freq, pattern ="TRUE"))))
+
+#create the survival quartiles
+NKI$survival_quartiles <- cut(NKI$survival, breaks=c(0, 5, 7, 10.1, 20), labels=c("0-5","5-7.5","7.5-10","10-20"))
+NKI$surv_quartile_event <- NA
+
+for(i in 1:length(NKI$survival_quartile)){
+if(NKI$survival_quartile[i] == "0-5" && NKI$eventdeath[i] == 1){NKI$surv_quartile_event[i] <- 1}
+#shortest time, they died
+if(NKI$survival_quartile[i] == "5-7.5" && NKI$eventdeath[i] == 1){NKI$surv_quartile_event[i] <- 2}
+#short time, they died
+if(NKI$survival_quartile[i] == "7.5-10" && NKI$eventdeath[i] == 1){NKI$surv_quartile_event[i] <- 3}
+#long time, they died
+if(NKI$survival_quartile[i] == "10-20" && NKI$eventdeath[i] == 1){NKI$surv_quartile_event[i] <- 4}
+#longest time, they died
+if(NKI$survival_quartile[i] == "0-5" && NKI$eventdeath[i] == 0){NKI$surv_quartile_event[i] <- 5}
+#they were still alive on last checkup, which was not long after diagnosis
+if(NKI$survival_quartile[i] == "5-7.5" && NKI$eventdeath[i] == 0){NKI$surv_quartile_event[i] <- 6}
+  if(NKI$survival_quartile[i] == "7.5-10" && NKI$eventdeath[i] == 0){NKI$surv_quartile_event[i] <- 7}
+  if(NKI$survival_quartile[i] == "10-20" && NKI$eventdeath[i] == 0){NKI$surv_quartile_event[i] <- 8}
+   }
+
+summary(as.factor(NKI$surv_quartile_event))
+#  1   2   3   4   5 
+# 48  14  10   5 195 
+#in 4 death catagories 1 life catagory
+ 
+# 1  2  3  4  6  7  8 
+#48 14 10  5 63 59 73 
+
+#density curves against survival in ggplot
+#generator needs has a class data, so that the discriminator can decide whether thats a reasonable class or not
+library(ggplot2)
+install.packages("devtools")
+library(devtools)
+install_github("easyGgplot2", "kassambara")
+library(easyGgplot2)
+
+NKI$eventdeath <- gsub(1, "Deceased", NKI$eventdeath)
+NKI$eventdeath <- gsub(0, "Alive", NKI$eventdeath)
+NKI$eventdeath <- as.factor(NKI$eventdeath)
+library(tidyverse)
+NKI$Status <- NKI$eventdeath
+
+#make density plot of survival against years
+ggplot(NKI, aes(x=survival, colour = Status, fill = Status)) + 
+  geom_density(alpha=0.4) +
+   geom_vline(xintercept= 5, linetype = "dashed") +
+  geom_vline(xintercept= 7.5, linetype = "dashed") +
+geom_vline(xintercept= 10, linetype = "dashed") +
+  geom_vline(xintercept=20, linetype = "dashed") +
+  labs(x = "Survival After Diagnosis (years)", y = "Percentage of Patients") +
+  theme_bw()
+
+
+#binned survival seperated by alive/dead status at end of study
+NKI_bin_event <- subset(NKI, select=c(Patient:survival, survival_quartiles, survival_binary, surv_binary_event, surv_quartile_event, timerecurrence:AF067420))
+
+#create csv for import into Python
+write.csv(NKI_bin_event, "~/Desktop/NKI_bin_event.csv") #272, 1574
+
+```
+
+```{}
+range <- c(0,4,20)
+col <- findInterval(NKI$survival, range, all.inside = TRUE)
+col[which(col==1)] <- "firebrick1"
+col[which(col==2)] <- "gold"
+col[which(col==3)] <- "darkolivegreen1"
+col[which(col==4)] <- "forestgreen"
+
+hist(NKI$survival, axes = TRUE, ylab = "", xlab = "", main = "", col = col, breaks = range, freq=TRUE, right = FALSE)
+```
+
+```{}
+
+NKI$colour <- 0
+
+for(i in 1:nrow(NKI)){
+if(NKI$survival[i] < 5){NKI$color[i] <- "darkred"}
+if(NKI$survival[i] > 5 && NKI$survival[i] < 7){NKI$color[i] <- "lightred"}
+if(NKI$survival[i] > 7 && NKI$survival[i] < 10){NKI$color[i] <- "lightblue"}
+if(NKI$survival[i] > 10 && NKI$survival[i] < 20){NKI$color[i] <- "darkblue"}
+}
+range <- c(0:4:20)
+col <- findInterval(NKI$survival, range, all.inside = TRUE)
+col[which(col==1)] <- "firebrick1"
+col[which(col==2)] <- "gold"
+col[which(col==3)] <- "darkolivegreen1"
+col[which(col==4)] <- "forestgreen"
+
+hist(NKI$survival, axes = TRUE, ylab = "", xlab = "", main = "", col = col, breaks = range, freq=TRUE, right = FALSE)
+NKI$survival_quartiles <- cut(NKI$survival, breaks=c(0, 5, 7.5, 10., 20), labels=c("0-5","5-7.5","7.5-10","10-20"))
+
+ggplot(NKI, aes(x=survival, fill = survival_quartiles)) +
+  geom_histogram() + 
+  scale_color_brewer(palette = "RdBu") +
+  geom_histogram(binwidth=1) +
+  theme_bw() +
+  labs(x = "Survival (years)", y = "Number of Patients")
+
+
+colors <- c(rep("darkred",5), rep("lightred",2), rep("lightblue",3), rep("darkblue",10))
+
+ggplot(NKI, aes(x= survival)) +
+  geom_histogram(fill=colors, binwidth=1) +
+  scale_x_discrete(limits=1:20)
+
+```
